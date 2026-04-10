@@ -1,0 +1,7 @@
+faiss-cpu==1.13.2
+numpy==2.4.4
+PyMuPDF==1.27.2.2
+python-dotenv==1.2.2
+sentence-transformers==5.4.0
+torch==2.11.0
+transformers==5.5.3
