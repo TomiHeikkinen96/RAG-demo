@@ -101,6 +101,12 @@ Agents should update this file when priorities become clearer, when work is comp
   Recommendation:
   Do not change the embedding model first. Clean the chunks first, then compare embedding models in a controlled way.
 
+- [ ] Consider BM25 or hybrid retrieval.
+  Why:
+  Some engineering queries are driven strongly by exact terminology, while others benefit more from semantic similarity.
+  Recommendation:
+  Evaluate whether BM25 alone, or a hybrid of BM25 and vector retrieval, improves recall and weak-match suppression for technical queries.
+
 - [ ] Test retrieval quality with repeatable queries and simple metrics.
   Why:
   Score expectations such as `0.7 or higher` are useful as a rough intuition, but they are not yet a reliable evaluation method for this dataset.
