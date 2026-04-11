@@ -60,6 +60,9 @@ Agents should read `todo.md` before starting substantial work, use it to underst
 
 When investigation produces meaningful findings, record them in `todo.md`. Do not limit updates to unchecked boxes only; use the file as a concise engineering log for completed work, open questions, and recommended next steps.
 
+`docs/retrieval-pipeline.md` is the short reference note for the current retrieval design.
+If retrieval behavior, scoring, chunking, or display-context logic changes in a meaningful way, keep that document aligned with the code. Do not let it drift into a stale theory document.
+
 ## Working Rules for This Repo
 
 - Preserve the local-first nature of the demo.
