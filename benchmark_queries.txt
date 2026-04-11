@@ -1,0 +1,10 @@
+# One query per line. Lines starting with # are ignored.
+
+maximum current
+ADC pins
+wifi current
+absolute maximum ratings
+flash voltage regulator
+gpio matrix
+deep sleep current
+pull-up resistor

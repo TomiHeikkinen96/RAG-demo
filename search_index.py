@@ -28,6 +28,8 @@ CANDIDATE_POOL = 50
 # Kept intentionally modest so lexical matches help reorder candidates
 # without overpowering the embedding-based semantic retrieval signal.
 LEXICAL_WEIGHT = 0.25
+# Reranking intentionally operates on the retrieved chunk only.
+# Larger paragraph text is kept for display/context expansion, not scoring.
 LOW_VALUE_SECTION_PATTERNS = (
     re.compile(r"\brevision history\b", re.IGNORECASE),
     re.compile(r"\bcontents\b", re.IGNORECASE),
@@ -75,14 +77,12 @@ def lexical_overlap_score(query: str, row: dict) -> float:
         return 0.0
 
     chunk_tokens = tokenize(row["chunk_text"])
-    paragraph_tokens = tokenize(row["paragraph_text"] or "")
-    matched_tokens = query_tokens & (chunk_tokens | paragraph_tokens)
+    matched_tokens = query_tokens & chunk_tokens
     return len(matched_tokens) / len(query_tokens)
 
 
 def low_value_section_penalty(row: dict) -> float:
-    display_text = row["paragraph_text"] or row["chunk_text"]
-    if any(pattern.search(display_text) for pattern in LOW_VALUE_SECTION_PATTERNS):
+    if any(pattern.search(row["chunk_text"]) for pattern in LOW_VALUE_SECTION_PATTERNS):
         return 0.12
     return 0.0
 

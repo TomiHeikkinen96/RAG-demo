@@ -20,6 +20,8 @@ Agents should update this file when priorities become clearer, when work is comp
 - [x] Return the whole paragraph as retrieval context.
   Notes:
   Search ranking is now based on `chunk_text`, while the user-facing result display prefers `paragraph_text` when available.
+  Reasoning:
+  This keeps retrieval focused on a smaller, more precise unit while still allowing larger context to be shown or passed downstream when needed.
 
 - [x] Review whether chunking is actually being applied.
   Findings:
@@ -67,11 +69,31 @@ Agents should update this file when priorities become clearer, when work is comp
   Remaining concern:
   The current penalty list is short and heuristic-based, so it should be refined only after testing with more real queries.
 
-- [ ] Improve search result presentation for tables.
+- [x] Keep reranking chunk-only for conceptual clarity.
+  Notes:
+  Lexical overlap and low-value penalties now operate on `chunk_text` only.
+  `paragraph_text` remains display-only context.
   Why:
-  Full paragraph reconstruction is useful for prose, but for large tables it often expands a small useful hit back into a huge noisy block.
+  This keeps retrieval, reranking, and explanation aligned to the same unit instead of giving a chunk lexical credit for words that only appear in surrounding context.
+
+- [ ] Improve weak-match suppression in the heuristic reranker.
+  Why:
+  The current reranker is good at promoting strong matches, but weaker semantic hits can still survive in the lower results.
   Recommendation:
-  For table-like matches, show the matched chunk plus table title/header context instead of always expanding to the full paragraph.
+  Test small, explicit heuristics such as:
+  requiring at least one meaningful chunk-token overlap for full rerank eligibility,
+  applying a mild penalty when semantic similarity is moderate but lexical overlap is zero,
+  or expanding the low-value section penalties carefully.
+
+- [ ] Make table handling a priority across chunking and presentation.
+  Why:
+  Tables are currently the noisiest source format in the corpus.
+  Full paragraph reconstruction is useful for prose, but for tables it often expands a small useful hit back into a huge noisy block.
+  Recommendation:
+  Treat this as a focused workstream:
+  improve table-aware chunk assembly,
+  keep table title/header context attached to row groups,
+  and show matched chunk plus compact table context instead of always expanding to the full paragraph.
 
 - [ ] Select and compare a better embedding model after chunk filtering improves.
   Why:
@@ -84,6 +106,12 @@ Agents should update this file when priorities become clearer, when work is comp
   Score expectations such as `0.7 or higher` are useful as a rough intuition, but they are not yet a reliable evaluation method for this dataset.
   Recommendation:
   Create a small benchmark query set with expected relevant pages or chunks, and compare top-k relevance before and after changes.
+
+- [x] Add a standardized batch benchmark runner.
+  Notes:
+  `benchmark_search.py` can now run a list of queries from command-line arguments or a text file so retrieval quality can be checked repeatedly with one command.
+  Recommendation:
+  Add and maintain a small `benchmark_queries.txt` file with representative engineering queries.
 
 - [ ] Fix fragile FAISS-to-metadata linking.
   Why:
@@ -115,7 +143,7 @@ Agents should update this file when priorities become clearer, when work is comp
 
 - [x] Standardize the most useful inspection workflows.
   Notes:
-  `inspect_db.py` now provides reusable commands for overall stats, per-document counts, largest chunk-to-paragraph expansions, page-specific chunk previews, and custom read-only SQL.
+  The database inspection script now provides reusable commands for overall stats, per-document counts, largest chunk-to-paragraph expansions, page-specific chunk previews, and custom read-only SQL.
 
 - [ ] Decide how much free-form SQL access the inspection tool should allow.
   Tradeoff:
