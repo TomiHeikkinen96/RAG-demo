@@ -35,12 +35,16 @@ def initialize_metadata_db(db_path: Path) -> None:
                 chunk_text TEXT NOT NULL,
                 chunk_index INTEGER NOT NULL,
                 page_number INTEGER,
+                paragraph_index INTEGER,
+                paragraph_text TEXT,
                 section_heading TEXT,
                 embedding_model TEXT NOT NULL,
                 ingestion_timestamp TEXT NOT NULL
             )
             """
         )
+        _ensure_column_exists(connection, "chunks", "paragraph_index", "INTEGER")
+        _ensure_column_exists(connection, "chunks", "paragraph_text", "TEXT")
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_chunks_document_id
@@ -53,6 +57,24 @@ def initialize_metadata_db(db_path: Path) -> None:
             ON chunks(source_path)
             """
         )
+
+
+def _ensure_column_exists(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    existing_columns = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name in existing_columns:
+        return
+
+    connection.execute(
+        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+    )
 
 
 def initialize_file_tracking_db(db_path: Path) -> None:
@@ -111,6 +133,8 @@ def insert_chunk_rows(db_path: Path, rows: list[dict]) -> None:
                 chunk_text,
                 chunk_index,
                 page_number,
+                paragraph_index,
+                paragraph_text,
                 section_heading,
                 embedding_model,
                 ingestion_timestamp
@@ -124,6 +148,8 @@ def insert_chunk_rows(db_path: Path, rows: list[dict]) -> None:
                 :chunk_text,
                 :chunk_index,
                 :page_number,
+                :paragraph_index,
+                :paragraph_text,
                 :section_heading,
                 :embedding_model,
                 :ingestion_timestamp
@@ -189,7 +215,9 @@ def fetch_chunks_by_ids(db_path: Path, chunk_ids: list[str]) -> list[sqlite3.Row
                 chunk_id,
                 source_path,
                 page_number,
+                paragraph_index,
                 chunk_text,
+                paragraph_text,
                 title,
                 section_heading
             FROM chunks

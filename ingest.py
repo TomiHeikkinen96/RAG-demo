@@ -159,6 +159,8 @@ def process_pdf(
                 "chunk_text": chunk["chunk_text"],
                 "chunk_index": chunk["chunk_index"],
                 "page_number": chunk["page_number"],
+                "paragraph_index": chunk["paragraph_index"],
+                "paragraph_text": chunk["paragraph_text"],
                 "section_heading": chunk["section_heading"],
                 "embedding_model": EMBEDDING_MODEL_NAME,
                 "ingestion_timestamp": ingestion_timestamp,
