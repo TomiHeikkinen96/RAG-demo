@@ -24,6 +24,10 @@ METADATA_DB_PATH = STORAGE_DIR / "metadata.sqlite"
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 TOP_K = 5
 CANDIDATE_POOL = 50
+# Heuristic weight for exact-term overlap in the reranker.
+# Kept intentionally modest so lexical matches help reorder candidates
+# without overpowering the embedding-based semantic retrieval signal.
+LEXICAL_WEIGHT = 0.25
 LOW_VALUE_SECTION_PATTERNS = (
     re.compile(r"\brevision history\b", re.IGNORECASE),
     re.compile(r"\bcontents\b", re.IGNORECASE),
@@ -83,10 +87,16 @@ def low_value_section_penalty(row: dict) -> float:
     return 0.0
 
 
-def rerank_score(query: str, semantic_score: float, row: dict) -> float:
+def rerank_components(query: str, semantic_score: float, row: dict) -> dict[str, float]:
     lexical_score = lexical_overlap_score(query, row)
     penalty = low_value_section_penalty(row)
-    return semantic_score + (0.25 * lexical_score) - penalty
+    reranked_score = semantic_score + (LEXICAL_WEIGHT * lexical_score) - penalty
+    return {
+        "semantic_score": semantic_score,
+        "lexical_score": lexical_score,
+        "penalty": penalty,
+        "rerank_score": reranked_score,
+    }
 
 
 def search_query(
@@ -94,7 +104,7 @@ def search_query(
     index: faiss.Index,
     embedder: TextEmbedder,
     ordered_chunk_ids: list[str],
-) -> list[tuple[float, float, dict]]:
+) -> list[dict]:
     query_embedding = embedder.embed_texts([query])
     faiss.normalize_L2(query_embedding)
 
@@ -110,7 +120,7 @@ def search_query(
     ]
     rows = fetch_chunks_by_ids(METADATA_DB_PATH, chunk_ids)
     row_lookup = {row["chunk_id"]: row for row in rows}
-    ranked_results: list[tuple[float, float, dict]] = []
+    ranked_results: list[dict] = []
     seen_paragraphs: set[tuple[str, int | None, int | None]] = set()
 
     for semantic_score, hit_index in zip(scores[0], indices[0]):
@@ -130,19 +140,19 @@ def search_query(
             continue
 
         seen_paragraphs.add(paragraph_key)
+        scores = rerank_components(query, float(semantic_score), row)
         ranked_results.append(
-            (
-                rerank_score(query, float(semantic_score), row),
-                float(semantic_score),
-                row,
-            )
+            {
+                "row": row,
+                **scores,
+            }
         )
 
-    ranked_results.sort(key=lambda item: item[0], reverse=True)
+    ranked_results.sort(key=lambda item: item["rerank_score"], reverse=True)
     return ranked_results[:TOP_K]
 
 
-def print_results(query: str, ranked_results: list[tuple[float, float, dict]]) -> None:
+def print_results(query: str, ranked_results: list[dict]) -> None:
     print(f"Query: {query}")
     if not ranked_results:
         print("No matches found.")
@@ -150,13 +160,24 @@ def print_results(query: str, ranked_results: list[tuple[float, float, dict]]) -
         return
 
     print()
-    for reranked_score, semantic_score, row in ranked_results:
-        print(f"Score: {reranked_score:.2f}")
-        print(f"Semantic Score: {semantic_score:.2f}")
+    for result in ranked_results:
+        row = result["row"]
+        print(f"Final Score: {result['rerank_score']:.2f}")
+        print("---")
+        print(f"Semantic Score: {result['semantic_score']:.2f}")
+        print(f"Lexical Score: {result['lexical_score']:.2f}")
+        print(f"Penalty: {result['penalty']:.2f}")
+        print(f"Rerank Score: {result['rerank_score']:.2f}")
+        print("---")
         print(f"File: {row['source_path']}")
         print(f"Page: {row['page_number']}")
+        chunk_length = len(row["chunk_text"])
+        paragraph_index = row["paragraph_index"]
+        print(f"Chunk (length: {chunk_length}, paragraph index: {paragraph_index}):")
+        print(preview_text(row["chunk_text"]))
+        print("-----")
         display_text = row["paragraph_text"] or row["chunk_text"]
-        print("Text:")
+        print(f"Retrieved Text (length: {len(display_text)}):")
         print(preview_text(display_text))
         print()
 
