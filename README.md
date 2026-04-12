@@ -1,4 +1,4 @@
-# ESP32 RAG Ingestion Demo
+# Engineering-Focused RAG Evaluation Platform for Embedded Development
 
 Local demo project exploring how to improve AI-assisted embedded software development by providing better hardware-grounded context.
 
