@@ -15,7 +15,7 @@ except ImportError as exc:
     ) from exc
 
 from processing.embedder import TextEmbedder
-from utils.db import fetch_all_chunk_ids_for_index, fetch_chunks_by_ids, initialize_metadata_db
+from utils.db import fetch_chunks_by_vector_ids, initialize_metadata_db
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 STORAGE_DIR = PROJECT_ROOT / "storage"
@@ -103,31 +103,25 @@ def search_query(
     query: str,
     index: faiss.Index,
     embedder: TextEmbedder,
-    ordered_chunk_ids: list[str],
 ) -> list[dict]:
     query_embedding = embedder.embed_texts([query])
     faiss.normalize_L2(query_embedding)
 
     scores, indices = index.search(query_embedding.astype(np.float32), CANDIDATE_POOL)
-    hit_indices = [int(idx) for idx in indices[0] if idx >= 0]
-    if not hit_indices:
+    vector_ids = [int(idx) for idx in indices[0] if idx >= 0]
+    if not vector_ids:
         return []
 
-    chunk_ids = [
-        ordered_chunk_ids[hit_index]
-        for hit_index in hit_indices
-        if hit_index < len(ordered_chunk_ids)
-    ]
-    rows = fetch_chunks_by_ids(METADATA_DB_PATH, chunk_ids)
-    row_lookup = {row["chunk_id"]: row for row in rows}
+    rows = fetch_chunks_by_vector_ids(METADATA_DB_PATH, vector_ids)
+    row_lookup = {int(row["vector_id"]): row for row in rows}
     ranked_results: list[dict] = []
     seen_paragraphs: set[tuple[str, int | None, int | None]] = set()
 
-    for semantic_score, hit_index in zip(scores[0], indices[0]):
-        if hit_index < 0 or hit_index >= len(ordered_chunk_ids):
+    for semantic_score, vector_id in zip(scores[0], indices[0]):
+        if vector_id < 0:
             continue
 
-        row = row_lookup.get(ordered_chunk_ids[hit_index])
+        row = row_lookup.get(int(vector_id))
         if row is None:
             continue
 
@@ -189,7 +183,6 @@ def main() -> None:
 
     index = faiss.read_index(str(INDEX_PATH))
     embedder = TextEmbedder(model_name=EMBEDDING_MODEL_NAME)
-    ordered_chunk_ids = fetch_all_chunk_ids_for_index(METADATA_DB_PATH)
 
     queries = args.queries
     if not queries:
@@ -202,7 +195,7 @@ def main() -> None:
     for index_number, query in enumerate(queries):
         if index_number > 0:
             print("-" * 80)
-        ranked_results = search_query(query, index, embedder, ordered_chunk_ids)
+        ranked_results = search_query(query, index, embedder)
         print_results(query, ranked_results)
 
 

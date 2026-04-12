@@ -5,6 +5,8 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable
 
+from utils.db import initialize_metadata_db
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "storage" / "metadata.sqlite"
 
@@ -24,6 +26,10 @@ def parse_args() -> argparse.Namespace:
 
     subparsers.add_parser("stats", help="Show overall chunk and paragraph statistics.")
     subparsers.add_parser("documents", help="Show per-document chunk and paragraph counts.")
+    subparsers.add_parser(
+        "index-status",
+        help="Show the latest index build and current indexed chunk mapping counts.",
+    )
 
     expansion_parser = subparsers.add_parser(
         "largest-expansions",
@@ -99,6 +105,26 @@ def command_documents(connection: sqlite3.Connection) -> None:
     print_rows(rows)
 
 
+def command_index_status(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT
+            indexes.index_version,
+            indexes.embedding_model,
+            indexes.built_at,
+            indexes.chunk_count,
+            COUNT(indexed_chunks.vector_id) AS mapped_vectors
+        FROM indexes
+        LEFT JOIN indexed_chunks
+            ON indexed_chunks.index_version = indexes.index_version
+        GROUP BY indexes.index_version, indexes.embedding_model, indexes.built_at, indexes.chunk_count
+        ORDER BY indexes.built_at DESC
+        LIMIT 5
+        """
+    ).fetchall()
+    print_rows(rows)
+
+
 def command_largest_expansions(connection: sqlite3.Connection, limit: int) -> None:
     rows = connection.execute(
         """
@@ -149,12 +175,15 @@ def command_sql(connection: sqlite3.Connection, query: str) -> None:
 
 def main() -> None:
     args = parse_args()
+    initialize_metadata_db(args.db)
     connection = connect(args.db)
     try:
         if args.command == "stats":
             command_stats(connection)
         elif args.command == "documents":
             command_documents(connection)
+        elif args.command == "index-status":
+            command_index_status(connection)
         elif args.command == "largest-expansions":
             command_largest_expansions(connection, args.limit)
         elif args.command == "page-chunks":

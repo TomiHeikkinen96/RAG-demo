@@ -45,6 +45,30 @@ def initialize_metadata_db(db_path: Path) -> None:
         )
         _ensure_column_exists(connection, "chunks", "paragraph_index", "INTEGER")
         _ensure_column_exists(connection, "chunks", "paragraph_text", "TEXT")
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS indexes (
+                index_version TEXT PRIMARY KEY,
+                embedding_model TEXT NOT NULL,
+                built_at TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS indexed_chunks (
+                vector_id INTEGER PRIMARY KEY,
+                chunk_id TEXT NOT NULL UNIQUE,
+                index_version TEXT NOT NULL,
+                embedding_model TEXT NOT NULL,
+                indexed_at TEXT NOT NULL,
+                FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id),
+                FOREIGN KEY (index_version) REFERENCES indexes(index_version)
+            )
+            """
+        )
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_chunks_document_id
@@ -55,6 +79,18 @@ def initialize_metadata_db(db_path: Path) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_chunks_source_path
             ON chunks(source_path)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_indexed_chunks_chunk_id
+            ON indexed_chunks(chunk_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_indexed_chunks_index_version
+            ON indexed_chunks(index_version)
             """
         )
 
@@ -88,27 +124,129 @@ def initialize_file_tracking_db(db_path: Path) -> None:
             )
             """
         )
+        _ensure_column_exists(
+            connection,
+            "files",
+            "last_seen",
+            "TEXT",
+        )
+        _ensure_column_exists(
+            connection,
+            "files",
+            "is_present",
+            "INTEGER NOT NULL DEFAULT 1",
+        )
+        _ensure_column_exists(
+            connection,
+            "files",
+            "deleted_at",
+            "TEXT",
+        )
+
+        connection.execute(
+            """
+            UPDATE files
+            SET last_seen = COALESCE(last_seen, last_processed),
+                is_present = COALESCE(is_present, 1)
+            """
+        )
 
 
 def get_file_record(db_path: Path, file_path: str) -> Optional[sqlite3.Row]:
     with sqlite_connection(db_path) as connection:
         return connection.execute(
-            "SELECT file_path, file_hash, last_processed FROM files WHERE file_path = ?",
+            """
+            SELECT
+                file_path,
+                file_hash,
+                last_processed,
+                last_seen,
+                is_present,
+                deleted_at
+            FROM files
+            WHERE file_path = ?
+            """,
             (file_path,),
         ).fetchone()
 
 
-def upsert_file_record(db_path: Path, file_path: str, file_hash: str) -> None:
+def fetch_all_file_records(db_path: Path) -> list[sqlite3.Row]:
+    with sqlite_connection(db_path) as connection:
+        return connection.execute(
+            """
+            SELECT
+                file_path,
+                file_hash,
+                last_processed,
+                last_seen,
+                is_present,
+                deleted_at
+            FROM files
+            ORDER BY file_path
+            """
+        ).fetchall()
+
+
+def record_file_seen(db_path: Path, file_path: str, file_hash: str) -> None:
+    timestamp = utc_now_iso()
     with sqlite_connection(db_path) as connection:
         connection.execute(
             """
-            INSERT INTO files(file_path, file_hash, last_processed)
-            VALUES (?, ?, ?)
+            INSERT INTO files(
+                file_path,
+                file_hash,
+                last_processed,
+                last_seen,
+                is_present,
+                deleted_at
+            )
+            VALUES (?, ?, ?, ?, 1, NULL)
             ON CONFLICT(file_path) DO UPDATE SET
                 file_hash = excluded.file_hash,
-                last_processed = excluded.last_processed
+                last_seen = excluded.last_seen,
+                is_present = 1,
+                deleted_at = NULL
             """,
-            (file_path, file_hash, utc_now_iso()),
+            (file_path, file_hash, timestamp, timestamp),
+        )
+
+
+def upsert_file_record(db_path: Path, file_path: str, file_hash: str) -> None:
+    timestamp = utc_now_iso()
+    with sqlite_connection(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO files(
+                file_path,
+                file_hash,
+                last_processed,
+                last_seen,
+                is_present,
+                deleted_at
+            )
+            VALUES (?, ?, ?, ?, 1, NULL)
+            ON CONFLICT(file_path) DO UPDATE SET
+                file_hash = excluded.file_hash,
+                last_processed = excluded.last_processed,
+                last_seen = excluded.last_seen,
+                is_present = 1,
+                deleted_at = NULL
+            """,
+            (file_path, file_hash, timestamp, timestamp),
+        )
+
+
+def mark_file_deleted(db_path: Path, file_path: str) -> None:
+    with sqlite_connection(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE files
+            SET is_present = 0,
+                deleted_at = ?,
+                last_seen = ?
+            WHERE file_path = ?
+            """,
+            (utc_now_iso(), utc_now_iso(), file_path),
         )
 
 
@@ -161,11 +299,24 @@ def insert_chunk_rows(db_path: Path, rows: list[dict]) -> None:
 
 def delete_document_chunks(db_path: Path, document_id: str) -> None:
     with sqlite_connection(db_path) as connection:
+        connection.execute(
+            """
+            DELETE FROM indexed_chunks
+            WHERE chunk_id IN (
+                SELECT chunk_id
+                FROM chunks
+                WHERE document_id = ?
+            )
+            """,
+            (document_id,),
+        )
         connection.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
 
 
 def clear_metadata_db(db_path: Path) -> None:
     with sqlite_connection(db_path) as connection:
+        connection.execute("DELETE FROM indexed_chunks")
+        connection.execute("DELETE FROM indexes")
         connection.execute("DELETE FROM chunks")
 
 
@@ -181,47 +332,76 @@ def fetch_all_chunks_for_index(db_path: Path) -> list[sqlite3.Row]:
             """
             SELECT chunk_id, chunk_text
             FROM chunks
-            ORDER BY source_path, chunk_index
+            ORDER BY source_path, chunk_index, chunk_id
             """
         ).fetchall()
 
 
-def fetch_all_chunk_ids_for_index(db_path: Path) -> list[str]:
+def replace_index_entries(
+    db_path: Path,
+    index_version: str,
+    embedding_model: str,
+    rows: list[dict],
+) -> None:
+    built_at = utc_now_iso()
     with sqlite_connection(db_path) as connection:
-        rows = connection.execute(
+        connection.execute("DELETE FROM indexed_chunks")
+        connection.execute(
             """
-            SELECT chunk_id
-            FROM chunks
-            ORDER BY source_path, chunk_index
-            """
-        ).fetchall()
-    return [row["chunk_id"] for row in rows]
+            INSERT INTO indexes(index_version, embedding_model, built_at, chunk_count)
+            VALUES (?, ?, ?, ?)
+            """,
+            (index_version, embedding_model, built_at, len(rows)),
+        )
+        if rows:
+            connection.executemany(
+                """
+                INSERT INTO indexed_chunks(
+                    vector_id,
+                    chunk_id,
+                    index_version,
+                    embedding_model,
+                    indexed_at
+                )
+                VALUES (
+                    :vector_id,
+                    :chunk_id,
+                    :index_version,
+                    :embedding_model,
+                    :indexed_at
+                )
+                """,
+                rows,
+            )
 
 
-def fetch_chunks_by_ids(db_path: Path, chunk_ids: list[str]) -> list[sqlite3.Row]:
-    if not chunk_ids:
+def fetch_chunks_by_vector_ids(db_path: Path, vector_ids: list[int]) -> list[sqlite3.Row]:
+    if not vector_ids:
         return []
 
-    placeholders = ",".join("?" for _ in chunk_ids)
-    order_by = "CASE chunk_id " + " ".join(
-        f"WHEN ? THEN {index}" for index, _ in enumerate(chunk_ids)
+    placeholders = ",".join("?" for _ in vector_ids)
+    order_by = "CASE indexed_chunks.vector_id " + " ".join(
+        f"WHEN ? THEN {index}" for index, _ in enumerate(vector_ids)
     ) + " END"
-    parameters = chunk_ids + chunk_ids
+    parameters = vector_ids + vector_ids
 
     with sqlite_connection(db_path) as connection:
         return connection.execute(
             f"""
             SELECT
-                chunk_id,
-                source_path,
-                page_number,
-                paragraph_index,
-                chunk_text,
-                paragraph_text,
-                title,
-                section_heading
-            FROM chunks
-            WHERE chunk_id IN ({placeholders})
+                indexed_chunks.vector_id,
+                indexed_chunks.index_version,
+                chunks.chunk_id,
+                chunks.source_path,
+                chunks.page_number,
+                chunks.paragraph_index,
+                chunks.chunk_text,
+                chunks.paragraph_text,
+                chunks.title,
+                chunks.section_heading
+            FROM indexed_chunks
+            JOIN chunks ON chunks.chunk_id = indexed_chunks.chunk_id
+            WHERE indexed_chunks.vector_id IN ({placeholders})
             ORDER BY {order_by}
             """,
             parameters,

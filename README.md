@@ -22,16 +22,18 @@ Questions this repo is trying to answer:
 Right now this repo provides:
 - local PDF ingestion from `data/`
 - file-level change detection using hashes
+- deleted-file detection for removed source PDFs
 - chunk generation for PDFs
 - sentence-transformer embeddings
 - SQLite metadata storage
-- FAISS vector index rebuild
+- explicit index-build metadata and vector-to-chunk mapping in SQLite
+- FAISS vector index rebuild with durable vector ids
 - simple local search over indexed content
 
 The current implementation is intentionally local-first. Source data is processed locally for this demo and is not intended to be redistributed through the repository.
 
 Current indexing tradeoff:
-- the FAISS index is rebuilt from stored chunks after ingestion instead of being updated incrementally
+- document changes are tracked incrementally in SQLite, but the active FAISS index is still rebuilt from the full current chunk set after each ingest run with changes
 - this is intentional for the current stage of the project
 
 Why keep it this way for now:
@@ -40,11 +42,26 @@ Why keep it this way for now:
 - easier to reason about during experimentation
 - faster to iterate on ingestion logic and storage design
 
-Known downside:
-- the mapping between stored chunk metadata and FAISS rows is implicit, so the approach is more fragile if modified incorrectly
-- this is acceptable for the current demo, but more explicit indexing and update logic will matter as the project moves toward larger-scale evaluation
+What is explicit now:
+- each index build is recorded in SQLite
+- each FAISS `vector_id` is mapped to a durable `chunk_id`
+- search resolves FAISS hits through stored index metadata instead of relying on repeated row ordering
+- when a tracked PDF is removed from `data/`, its chunks are deleted and excluded from the next rebuilt index
+
+Current limitation:
+- the ingest step only reprocesses changed documents, but the vector build step still re-embeds and rewrites the full active corpus
+- this keeps the index state easy to inspect and avoids partial-update edge cases, but a larger corpus would likely justify embedding reuse and selective FAISS updates
 
 ## Install
+
+Tested with:
+
+```bash
+python3 --version
+Python 3.12.3
+```
+
+If you use an older Python such as `3.10.x`, setup or runtime behavior may fail. For now, prefer Python `3.12`.
 
 ```bash
 source ./setup_venv.sh

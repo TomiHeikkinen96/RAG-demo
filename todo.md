@@ -119,11 +119,26 @@ Agents should update this file when priorities become clearer, when work is comp
   Recommendation:
   Add and maintain a small `benchmark_queries.txt` file with representative engineering queries.
 
-- [ ] Fix fragile FAISS-to-metadata linking.
+- [x] Fix fragile FAISS-to-metadata linking.
+  Notes:
+  Search no longer reconstructs FAISS hit meaning from SQLite row ordering.
+  The repository now records explicit index builds in `indexes` and explicit `vector_id -> chunk_id` mappings in `indexed_chunks`.
+  Search resolves FAISS hits through that mapping instead of replaying `ORDER BY source_path, chunk_index`.
+
+- [x] Fix deleted-file handling during ingestion.
+  Notes:
+  Ingestion now detects PDFs that were removed from `data/`, deletes their chunks from SQLite, marks their file records as not present, and rebuilds FAISS without those chunks.
+  The current design intentionally deletes removed-file chunks instead of soft-deactivating them so the demo stays compact while retrieval behavior is still evolving.
+
+- [ ] Reduce full-corpus rebuild cost after small ingestion changes.
   Why:
-  Search still relies on implicit row ordering between FAISS rows and SQLite chunk IDs.
+  The current pipeline now handles document additions, changes, and deletions correctly, but any ingest run with changes still rebuilds FAISS from all active chunks and re-embeds the full active corpus.
+  This is fine for the current demo size, but it will scale poorly as the corpus grows.
   Recommendation:
-  Replace order-based mapping with an explicit, durable mapping between indexed vectors and chunk metadata.
+  Keep the explicit `indexes` and `indexed_chunks` model, then explore:
+  embedding reuse for unchanged chunks,
+  selective FAISS add/remove updates by durable `vector_id`,
+  and a clearer separation between per-document ingest work and whole-index rebuild policy.
 
 - [ ] Add better support for tables and images in PDFs.
   Why:
@@ -167,3 +182,12 @@ Agents should update this file when priorities become clearer, when work is comp
   The main remaining issue is that PDF extraction still produces noisy boilerplate, table headers, and fragmented low-information chunks.
 
 - The next high-value implementation step is chunk filtering and better table-aware chunk assembly, not immediate embedding-model replacement.
+
+- Retrieval identity is now explicit instead of order-based.
+  `ingest.py` rebuilds FAISS with `IndexIDMap2`, stores index build metadata in `indexes`, and records `vector_id -> chunk_id` mappings in `indexed_chunks`.
+  `search_index.py` resolves FAISS hits through that mapping.
+  This removes the previous hidden dependency on matching SQLite sort order across separate code paths.
+
+- Deleted-file handling is now explicit.
+  If a tracked PDF disappears from `data/`, ingestion marks the file record as no longer present, deletes its chunks, and rebuilds the active index without stale vectors.
+  This closes the previous gap where removed files could remain searchable indefinitely.

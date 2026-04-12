@@ -14,7 +14,7 @@ from search_index import (
     preview_text,
     search_query,
 )
-from utils.db import fetch_all_chunk_ids_for_index, initialize_metadata_db
+from utils.db import initialize_metadata_db
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,7 +73,6 @@ def main() -> None:
 
     index = faiss.read_index(str(INDEX_PATH))
     embedder = TextEmbedder(model_name=EMBEDDING_MODEL_NAME)
-    ordered_chunk_ids = fetch_all_chunk_ids_for_index(METADATA_DB_PATH)
 
     for query_index, query in enumerate(queries):
         if query_index > 0:
@@ -81,7 +80,7 @@ def main() -> None:
 
         print(f"Query: {query}")
         print()
-        results = search_query(query, index, embedder, ordered_chunk_ids)
+        results = search_query(query, index, embedder)
         if not results:
             print("No matches found.")
             print()

@@ -9,11 +9,12 @@ It is intentionally short. It should stay aligned with the actual code and shoul
 1. PDFs are loaded and split into smaller retrieval units.
 2. Prose is chunked using sentence-aware grouping.
 3. Structured PDF content such as tables is chunked using smaller line-group logic with some local header/context retention.
-4. Each chunk is embedded and stored in FAISS.
-5. Chunk metadata is stored in SQLite.
-6. Search retrieves candidate chunks from FAISS.
-7. Retrieved candidates are reranked using simple heuristic signals.
-8. Search output shows the matched chunk and larger paragraph context when available.
+4. Chunk metadata is stored in SQLite.
+5. A full index build writes a new FAISS index and records explicit vector-to-chunk mappings in SQLite.
+6. Search retrieves candidate vector ids from FAISS.
+7. Search resolves those vector ids back to chunk metadata through `indexed_chunks`.
+8. Retrieved candidates are reranked using simple heuristic signals.
+9. Search output shows the matched chunk and larger paragraph context when available.
 
 ## Retrieval Unit vs Display Context
 
@@ -34,6 +35,38 @@ This separation is intentional:
 - larger paragraph context improves readability and can be useful for downstream agent/LLM use
 
 The current design treats retrieval precision and context expansion as separate steps.
+
+## Index Identity And Inspectability
+
+The repository no longer relies on FAISS row order matching a repeated SQLite sort.
+
+Instead, each rebuild now creates explicit retrieval metadata:
+
+- `indexes`
+- `indexed_chunks`
+
+`indexes` records the index build version, embedding model, build time, and chunk count.
+
+`indexed_chunks` maps each FAISS `vector_id` to a durable `chunk_id`.
+
+This makes the retrieval linkage explicit:
+
+- FAISS returns `vector_id`
+- SQLite resolves `vector_id -> chunk_id -> chunk metadata`
+
+This design is easier to inspect and less fragile than relying on implicit row ordering across systems.
+
+## File Deletion Handling
+
+Ingestion now detects PDFs that were removed from `data/`.
+
+When a tracked file disappears:
+
+- its chunks are deleted from SQLite
+- its file-tracking record is marked as no longer present
+- the next FAISS rebuild excludes it automatically
+
+The current design prefers deletion over soft-deactivation so the demo database stays small and easy to reason about while retrieval behavior is still being evaluated.
 
 ## Current Reranking
 
@@ -83,7 +116,6 @@ What is still weak:
 - table-heavy PDF content is still noisy
 - weak semantic matches can still survive in lower-ranked results
 - result presentation for table-derived chunks is still rough
-- FAISS-to-metadata mapping is still order-based and should be made more explicit later
 
 ## Practical Commands
 
@@ -105,5 +137,6 @@ Database inspection:
 
 ```bash
 python3 db_inspect.py stats
+python3 db_inspect.py index-status
 python3 db_inspect.py page-chunks --path-contains esp32-wroom-32d_esp32-wroom-32u_datasheet_en.pdf --page 25
 ```
