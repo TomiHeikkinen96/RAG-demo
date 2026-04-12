@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
+ACTIVE_INDEX_VERSION = "active"
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -64,8 +66,7 @@ def initialize_metadata_db(db_path: Path) -> None:
                 index_version TEXT NOT NULL,
                 embedding_model TEXT NOT NULL,
                 indexed_at TEXT NOT NULL,
-                FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id),
-                FOREIGN KEY (index_version) REFERENCES indexes(index_version)
+                FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id)
             )
             """
         )
@@ -124,24 +125,14 @@ def initialize_file_tracking_db(db_path: Path) -> None:
             )
             """
         )
-        _ensure_column_exists(
-            connection,
-            "files",
-            "last_seen",
-            "TEXT",
-        )
+        _ensure_column_exists(connection, "files", "last_seen", "TEXT")
         _ensure_column_exists(
             connection,
             "files",
             "is_present",
             "INTEGER NOT NULL DEFAULT 1",
         )
-        _ensure_column_exists(
-            connection,
-            "files",
-            "deleted_at",
-            "TEXT",
-        )
+        _ensure_column_exists(connection, "files", "deleted_at", "TEXT")
 
         connection.execute(
             """
@@ -238,6 +229,7 @@ def upsert_file_record(db_path: Path, file_path: str, file_hash: str) -> None:
 
 def mark_file_deleted(db_path: Path, file_path: str) -> None:
     with sqlite_connection(db_path) as connection:
+        timestamp = utc_now_iso()
         connection.execute(
             """
             UPDATE files
@@ -246,7 +238,7 @@ def mark_file_deleted(db_path: Path, file_path: str) -> None:
                 last_seen = ?
             WHERE file_path = ?
             """,
-            (utc_now_iso(), utc_now_iso(), file_path),
+            (timestamp, timestamp, file_path),
         )
 
 
@@ -297,6 +289,47 @@ def insert_chunk_rows(db_path: Path, rows: list[dict]) -> None:
         )
 
 
+def insert_index_entries(db_path: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    with sqlite_connection(db_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO indexed_chunks(
+                vector_id,
+                chunk_id,
+                index_version,
+                embedding_model,
+                indexed_at
+            )
+            VALUES (
+                :vector_id,
+                :chunk_id,
+                :index_version,
+                :embedding_model,
+                :indexed_at
+            )
+            """,
+            rows,
+        )
+
+
+def fetch_vector_ids_for_document(db_path: Path, document_id: str) -> list[int]:
+    with sqlite_connection(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT indexed_chunks.vector_id
+            FROM indexed_chunks
+            JOIN chunks ON chunks.chunk_id = indexed_chunks.chunk_id
+            WHERE chunks.document_id = ?
+            ORDER BY indexed_chunks.vector_id
+            """,
+            (document_id,),
+        ).fetchall()
+    return [int(row["vector_id"]) for row in rows]
+
+
 def delete_document_chunks(db_path: Path, document_id: str) -> None:
     with sqlite_connection(db_path) as connection:
         connection.execute(
@@ -326,53 +359,41 @@ def count_chunks(db_path: Path) -> int:
         return int(row["count"])
 
 
-def fetch_all_chunks_for_index(db_path: Path) -> list[sqlite3.Row]:
+def count_index_entries(db_path: Path) -> int:
     with sqlite_connection(db_path) as connection:
-        return connection.execute(
-            """
-            SELECT chunk_id, chunk_text
-            FROM chunks
-            ORDER BY source_path, chunk_index, chunk_id
-            """
-        ).fetchall()
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM indexed_chunks"
+        ).fetchone()
+        return int(row["count"])
 
 
-def replace_index_entries(
+def get_next_vector_id(db_path: Path) -> int:
+    with sqlite_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT COALESCE(MAX(vector_id), -1) + 1 AS next_vector_id FROM indexed_chunks"
+        ).fetchone()
+    return int(row["next_vector_id"])
+
+
+def replace_index_metadata(
     db_path: Path,
-    index_version: str,
     embedding_model: str,
-    rows: list[dict],
+    chunk_count: int,
 ) -> None:
-    built_at = utc_now_iso()
     with sqlite_connection(db_path) as connection:
-        connection.execute("DELETE FROM indexed_chunks")
+        connection.execute("DELETE FROM indexes")
         connection.execute(
             """
             INSERT INTO indexes(index_version, embedding_model, built_at, chunk_count)
             VALUES (?, ?, ?, ?)
             """,
-            (index_version, embedding_model, built_at, len(rows)),
+            (
+                ACTIVE_INDEX_VERSION,
+                embedding_model,
+                utc_now_iso(),
+                chunk_count,
+            ),
         )
-        if rows:
-            connection.executemany(
-                """
-                INSERT INTO indexed_chunks(
-                    vector_id,
-                    chunk_id,
-                    index_version,
-                    embedding_model,
-                    indexed_at
-                )
-                VALUES (
-                    :vector_id,
-                    :chunk_id,
-                    :index_version,
-                    :embedding_model,
-                    :indexed_at
-                )
-                """,
-                rows,
-            )
 
 
 def fetch_chunks_by_vector_ids(db_path: Path, vector_ids: list[int]) -> list[sqlite3.Row]:

@@ -66,10 +66,13 @@ class TextEmbedder:
             modeling_utils.log_state_dict_report = original_modeling_utils_report
             loading_report.log_state_dict_report = original_loading_report
 
+    def get_embedding_dimension(self) -> int:
+        return int(self.model.get_embedding_dimension())
+
     def embed_texts(self, texts: Iterable[str], batch_size: int = 32) -> np.ndarray:
         text_list = list(texts)
         if not text_list:
-            return np.empty((0, self.model.get_sentence_embedding_dimension()), dtype=np.float32)
+            return np.empty((0, self.get_embedding_dimension()), dtype=np.float32)
 
         embeddings = self.model.encode(
             text_list,

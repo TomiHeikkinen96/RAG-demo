@@ -19,22 +19,26 @@ from chunkers.pdf_chunker import PDFChunker
 from processing.embedder import TextEmbedder
 from processing.pdf_loader import load_pdf_pages
 from utils.db import (
+    ACTIVE_INDEX_VERSION,
     clear_file_tracking_db,
     clear_metadata_db,
     count_chunks,
+    count_index_entries,
     delete_document_chunks,
     fetch_all_file_records,
-    fetch_all_chunks_for_index,
+    fetch_vector_ids_for_document,
     get_distinct_embedding_models,
-    mark_file_deleted,
+    get_next_vector_id,
+    get_file_record,
     initialize_file_tracking_db,
     initialize_metadata_db,
     insert_chunk_rows,
+    insert_index_entries,
+    mark_file_deleted,
     record_file_seen,
-    replace_index_entries,
+    replace_index_metadata,
     upsert_file_record,
     utc_now_iso,
-    get_file_record,
 )
 from utils.hashing import sha256_file
 
@@ -70,7 +74,11 @@ def ensure_directories() -> None:
 
 
 def discover_pdf_files() -> list[Path]:
-    return sorted(path for path in DATA_DIR.rglob("*") if path.is_file() and path.suffix.lower() == ".pdf")
+    return sorted(
+        path
+        for path in DATA_DIR.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".pdf"
+    )
 
 
 def reset_storage() -> None:
@@ -95,11 +103,15 @@ def detect_files_to_process(pdf_paths: list[Path]) -> tuple[list[dict], list[dic
             continue
 
         if not record["is_present"]:
-            process_queue.append({"path": pdf_path, "hash": file_hash, "status": "RESTORED"})
+            process_queue.append(
+                {"path": pdf_path, "hash": file_hash, "status": "RESTORED"}
+            )
             continue
 
         if record["file_hash"] != file_hash:
-            process_queue.append({"path": pdf_path, "hash": file_hash, "status": "CHANGED"})
+            process_queue.append(
+                {"path": pdf_path, "hash": file_hash, "status": "CHANGED"}
+            )
 
     return process_queue, seen_files
 
@@ -149,10 +161,54 @@ def ensure_model_consistency(force_rebuild: bool) -> None:
     sys.exit(1)
 
 
+def record_current_files_seen(seen_files: list[dict]) -> None:
+    for file_info in seen_files:
+        record_file_seen(FILE_TRACKING_DB_PATH, str(file_info["path"]), file_info["hash"])
+
+
+def create_empty_faiss_index(embedder: TextEmbedder) -> faiss.Index:
+    dimension = embedder.get_embedding_dimension()
+    return faiss.IndexIDMap2(faiss.IndexFlatIP(dimension))
+
+
+def load_existing_index(embedder: TextEmbedder) -> faiss.Index:
+    if INDEX_PATH.exists():
+        return faiss.read_index(str(INDEX_PATH))
+
+    existing_chunks = count_chunks(METADATA_DB_PATH)
+    existing_index_entries = count_index_entries(METADATA_DB_PATH)
+    if existing_chunks or existing_index_entries:
+        print("Error: FAISS index file is missing, but metadata already exists.")
+        print("Run again with --force-rebuild to reconstruct the index safely.")
+        sys.exit(1)
+
+    return create_empty_faiss_index(embedder)
+
+
+def remove_vector_ids_from_index(index: faiss.Index, vector_ids: list[int]) -> None:
+    if not vector_ids:
+        return
+
+    ids_to_remove = np.asarray(vector_ids, dtype=np.int64)
+    removed_count = index.remove_ids(ids_to_remove)
+    if removed_count != len(vector_ids):
+        print(
+            "Warning: FAISS removed "
+            f"{removed_count} vectors, expected {len(vector_ids)}."
+        )
+
+
+def remove_document_from_index(index: faiss.Index, document_id: str) -> None:
+    vector_ids = fetch_vector_ids_for_document(METADATA_DB_PATH, document_id)
+    if vector_ids:
+        remove_vector_ids_from_index(index, vector_ids)
+
+
 def process_pdf(
     pdf_path: Path,
     file_hash: str,
     embedder: TextEmbedder,
+    index: faiss.Index,
 ) -> int:
     print(f"Processing: {pdf_path}")
     pages = load_pdf_pages(pdf_path)
@@ -160,14 +216,13 @@ def process_pdf(
     chunks = chunker.chunk_pages(pages)
     print(f"Created {len(chunks)} chunks.")
 
+    document_id = str(pdf_path)
+    remove_document_from_index(index, document_id)
+    delete_document_chunks(METADATA_DB_PATH, document_id)
+
     if not chunks:
-        document_id = str(pdf_path)
-        delete_document_chunks(METADATA_DB_PATH, document_id)
         upsert_file_record(FILE_TRACKING_DB_PATH, str(pdf_path), file_hash)
         return 0
-
-    document_id = str(pdf_path)
-    delete_document_chunks(METADATA_DB_PATH, document_id)
 
     chunk_texts = [chunk["chunk_text"] for chunk in chunks]
     print(f"Embedding {len(chunk_texts)} chunks on {embedder.device}.")
@@ -175,7 +230,7 @@ def process_pdf(
 
     rows = []
     ingestion_timestamp = utc_now_iso()
-    for chunk, _embedding in zip(chunks, embeddings):
+    for chunk in chunks:
         rows.append(
             {
                 "chunk_id": str(uuid4()),
@@ -195,67 +250,71 @@ def process_pdf(
         )
 
     insert_chunk_rows(METADATA_DB_PATH, rows)
+
+    start_vector_id = get_next_vector_id(METADATA_DB_PATH)
+    vector_ids = np.arange(start_vector_id, start_vector_id + len(rows), dtype=np.int64)
+    index.add_with_ids(embeddings, vector_ids)
+    insert_index_entries(
+        METADATA_DB_PATH,
+        [
+            {
+                "vector_id": int(vector_id),
+                "chunk_id": row["chunk_id"],
+                "index_version": ACTIVE_INDEX_VERSION,
+                "embedding_model": EMBEDDING_MODEL_NAME,
+                "indexed_at": ingestion_timestamp,
+            }
+            for vector_id, row in zip(vector_ids.tolist(), rows)
+        ],
+    )
+
     upsert_file_record(FILE_TRACKING_DB_PATH, str(pdf_path), file_hash)
     return len(rows)
 
 
-def delete_missing_documents(deleted_paths: list[Path]) -> int:
+def delete_missing_documents(index: faiss.Index, deleted_paths: list[Path]) -> int:
     for deleted_path in deleted_paths:
         print(f"Deleting removed source: {deleted_path}")
+        remove_document_from_index(index, str(deleted_path))
         delete_document_chunks(METADATA_DB_PATH, str(deleted_path))
         mark_file_deleted(FILE_TRACKING_DB_PATH, str(deleted_path))
     return len(deleted_paths)
 
 
-def record_current_files_seen(seen_files: list[dict]) -> None:
-    for file_info in seen_files:
-        record_file_seen(
-            FILE_TRACKING_DB_PATH,
-            str(file_info["path"]),
-            file_info["hash"],
+def save_index_state(index: faiss.Index) -> None:
+    chunk_count = count_chunks(METADATA_DB_PATH)
+    index_entry_count = count_index_entries(METADATA_DB_PATH)
+    if chunk_count != index_entry_count:
+        print(
+            "Error: chunk metadata and indexed chunk metadata disagree "
+            f"({chunk_count} chunks vs {index_entry_count} index entries)."
         )
+        print("Run again with --force-rebuild to recover a clean index state.")
+        sys.exit(1)
 
+    if int(index.ntotal) != chunk_count:
+        print(
+            "Error: FAISS vector count and SQLite metadata disagree "
+            f"({int(index.ntotal)} vectors vs {chunk_count} chunks)."
+        )
+        print("Run again with --force-rebuild to recover a clean index state.")
+        sys.exit(1)
 
-def rebuild_faiss_index(embedder: TextEmbedder) -> None:
-    all_chunks = fetch_all_chunks_for_index(METADATA_DB_PATH)
-    if not all_chunks:
-        print("No chunks stored. Skipping FAISS rebuild.")
+    if chunk_count == 0:
         if INDEX_PATH.exists():
             INDEX_PATH.unlink()
-        replace_index_entries(
+        replace_index_metadata(
             METADATA_DB_PATH,
-            index_version=str(uuid4()),
             embedding_model=EMBEDDING_MODEL_NAME,
-            rows=[],
+            chunk_count=0,
         )
         return
 
-    print(f"Rebuilding FAISS index from {len(all_chunks)} stored chunks.")
-    texts = [row["chunk_text"] for row in all_chunks]
-    embeddings = embedder.embed_texts(texts)
-    faiss.normalize_L2(embeddings)
-
-    index = faiss.IndexIDMap2(faiss.IndexFlatIP(embeddings.shape[1]))
-    vector_ids = np.arange(len(all_chunks), dtype=np.int64)
-    index.add_with_ids(embeddings, vector_ids)
     faiss.write_index(index, str(INDEX_PATH))
-
-    index_version = str(uuid4())
-    indexed_at = utc_now_iso()
-    replace_index_entries(
+    replace_index_metadata(
         METADATA_DB_PATH,
-        index_version=index_version,
         embedding_model=EMBEDDING_MODEL_NAME,
-        rows=[
-            {
-                "vector_id": int(vector_id),
-                "chunk_id": row["chunk_id"],
-                "index_version": index_version,
-                "embedding_model": EMBEDDING_MODEL_NAME,
-                "indexed_at": indexed_at,
-            }
-            for vector_id, row in zip(vector_ids.tolist(), all_chunks)
-        ],
+        chunk_count=chunk_count,
     )
     print(f"Saved FAISS index to {INDEX_PATH}")
 
@@ -278,19 +337,20 @@ def main() -> None:
     record_current_files_seen(seen_files)
 
     embedder = TextEmbedder(model_name=EMBEDDING_MODEL_NAME)
+    index = create_empty_faiss_index(embedder) if args.force_rebuild else load_existing_index(embedder)
 
     processed_files = 0
     processed_chunks = 0
-    deleted_files = delete_missing_documents(deleted_paths)
+    deleted_files = delete_missing_documents(index, deleted_paths)
 
-    for index, file_info in enumerate(files_to_process, start=1):
+    for file_number, file_info in enumerate(files_to_process, start=1):
         pdf_path = file_info["path"]
         status = file_info["status"]
-        print(f"[{index}/{len(files_to_process)}] {status}: {pdf_path}")
-        processed_chunks += process_pdf(pdf_path, file_info["hash"], embedder)
+        print(f"[{file_number}/{len(files_to_process)}] {status}: {pdf_path}")
+        processed_chunks += process_pdf(pdf_path, file_info["hash"], embedder, index)
         processed_files += 1
 
-    rebuild_faiss_index(embedder)
+    save_index_state(index)
     total_chunks = count_chunks(METADATA_DB_PATH)
     print("Ingestion complete.")
     print(f"Processed files: {processed_files}")

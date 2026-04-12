@@ -127,18 +127,16 @@ Agents should update this file when priorities become clearer, when work is comp
 
 - [x] Fix deleted-file handling during ingestion.
   Notes:
-  Ingestion now detects PDFs that were removed from `data/`, deletes their chunks from SQLite, marks their file records as not present, and rebuilds FAISS without those chunks.
+  Ingestion now detects PDFs that were removed from `data/`, deletes their chunks from SQLite, marks their file records as not present, and removes their vectors from the active index.
   The current design intentionally deletes removed-file chunks instead of soft-deactivating them so the demo stays compact while retrieval behavior is still evolving.
 
-- [ ] Reduce full-corpus rebuild cost after small ingestion changes.
-  Why:
-  The current pipeline now handles document additions, changes, and deletions correctly, but any ingest run with changes still rebuilds FAISS from all active chunks and re-embeds the full active corpus.
-  This is fine for the current demo size, but it will scale poorly as the corpus grows.
-  Recommendation:
-  Keep the explicit `indexes` and `indexed_chunks` model, then explore:
-  embedding reuse for unchanged chunks,
-  selective FAISS add/remove updates by durable `vector_id`,
-  and a clearer separation between per-document ingest work and whole-index rebuild policy.
+- [x] Reduce full-corpus rebuild cost after small ingestion changes.
+  Notes:
+  Normal ingest runs now update the active FAISS index incrementally.
+  Deleted documents remove their stored vectors, changed documents replace only their own vectors, and new documents add only new vectors.
+  `--force-rebuild` remains the explicit full rebuild path.
+  Why this matters:
+  This preserves the explicit `indexed_chunks` mapping while removing the previous need to re-embed and rewrite the entire active corpus on every changed ingest run.
 
 - [ ] Add better support for tables and images in PDFs.
   Why:
@@ -184,10 +182,14 @@ Agents should update this file when priorities become clearer, when work is comp
 - The next high-value implementation step is chunk filtering and better table-aware chunk assembly, not immediate embedding-model replacement.
 
 - Retrieval identity is now explicit instead of order-based.
-  `ingest.py` rebuilds FAISS with `IndexIDMap2`, stores index build metadata in `indexes`, and records `vector_id -> chunk_id` mappings in `indexed_chunks`.
+  `ingest.py` maintains FAISS with `IndexIDMap2`, stores active index metadata in `indexes`, and records `vector_id -> chunk_id` mappings in `indexed_chunks`.
   `search_index.py` resolves FAISS hits through that mapping.
   This removes the previous hidden dependency on matching SQLite sort order across separate code paths.
 
 - Deleted-file handling is now explicit.
-  If a tracked PDF disappears from `data/`, ingestion marks the file record as no longer present, deletes its chunks, and rebuilds the active index without stale vectors.
+  If a tracked PDF disappears from `data/`, ingestion marks the file record as no longer present, deletes its chunks, and removes its vectors from the active index.
   This closes the previous gap where removed files could remain searchable indefinitely.
+
+- Normal ingestion is now incremental at the vector-index level.
+  A standard ingest run updates only the affected document vectors instead of re-embedding and rebuilding the full active corpus.
+  `--force-rebuild` remains available when a clean full reset is desired.

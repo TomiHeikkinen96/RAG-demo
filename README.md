@@ -27,13 +27,14 @@ Right now this repo provides:
 - sentence-transformer embeddings
 - SQLite metadata storage
 - explicit index-build metadata and vector-to-chunk mapping in SQLite
-- FAISS vector index rebuild with durable vector ids
+- FAISS vector indexing with durable vector ids
 - simple local search over indexed content
 
 The current implementation is intentionally local-first. Source data is processed locally for this demo and is not intended to be redistributed through the repository.
 
 Current indexing tradeoff:
-- document changes are tracked incrementally in SQLite, but the active FAISS index is still rebuilt from the full current chunk set after each ingest run with changes
+- normal ingest runs update FAISS incrementally by removing and adding only the affected document vectors
+- `--force-rebuild` still clears storage and rebuilds the full active index from scratch
 - this is intentional for the current stage of the project
 
 Why keep it this way for now:
@@ -46,11 +47,11 @@ What is explicit now:
 - each index build is recorded in SQLite
 - each FAISS `vector_id` is mapped to a durable `chunk_id`
 - search resolves FAISS hits through stored index metadata instead of relying on repeated row ordering
-- when a tracked PDF is removed from `data/`, its chunks are deleted and excluded from the next rebuilt index
+- when a tracked PDF is removed from `data/`, its chunks and vectors are deleted from the active index state
 
 Current limitation:
-- the ingest step only reprocesses changed documents, but the vector build step still re-embeds and rewrites the full active corpus
-- this keeps the index state easy to inspect and avoids partial-update edge cases, but a larger corpus would likely justify embedding reuse and selective FAISS updates
+- vector ids are durable within the active index state, but `--force-rebuild` intentionally assigns a fresh index from scratch
+- larger corpora may still justify additional work such as embedding reuse across experimental rebuilds, richer index-version history, or more sophisticated update policies
 
 ## Install
 

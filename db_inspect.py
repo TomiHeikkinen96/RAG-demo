@@ -5,10 +5,13 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable
 
+import faiss
+
 from utils.db import initialize_metadata_db
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "storage" / "metadata.sqlite"
+DEFAULT_INDEX_PATH = PROJECT_ROOT / "storage" / "index.faiss"
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,6 +24,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_DB_PATH,
         help=f"Path to the metadata SQLite database. Defaults to {DEFAULT_DB_PATH}.",
     )
+    parser.add_argument(
+        "--index",
+        type=Path,
+        default=DEFAULT_INDEX_PATH,
+        help=f"Path to the FAISS index file. Defaults to {DEFAULT_INDEX_PATH}.",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -29,6 +38,10 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser(
         "index-status",
         help="Show the latest index build and current indexed chunk mapping counts.",
+    )
+    subparsers.add_parser(
+        "index-integrity",
+        help="Check whether chunk rows, indexed chunk mappings, and FAISS vectors agree.",
     )
 
     expansion_parser = subparsers.add_parser(
@@ -125,6 +138,45 @@ def command_index_status(connection: sqlite3.Connection) -> None:
     print_rows(rows)
 
 
+def command_index_integrity(connection: sqlite3.Connection, index_path: Path) -> None:
+    counts = connection.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM chunks) AS chunk_count,
+            (SELECT COUNT(*) FROM indexed_chunks) AS indexed_chunk_count,
+            (SELECT COALESCE(MAX(vector_id), -1) FROM indexed_chunks) AS max_vector_id
+        """
+    ).fetchone()
+
+    faiss_vector_count = 0
+    if index_path.exists():
+        index = faiss.read_index(str(index_path))
+        faiss_vector_count = int(index.ntotal)
+
+    chunk_count = int(counts["chunk_count"])
+    indexed_chunk_count = int(counts["indexed_chunk_count"])
+    max_vector_id = int(counts["max_vector_id"])
+    expected_next_vector_id = max_vector_id + 1 if indexed_chunk_count else 0
+    counts_match = chunk_count == indexed_chunk_count == faiss_vector_count
+
+    print(
+        {
+            "chunk_count": chunk_count,
+            "indexed_chunk_count": indexed_chunk_count,
+            "faiss_vector_count": faiss_vector_count,
+            "max_vector_id": max_vector_id,
+            "next_vector_id_if_appended": expected_next_vector_id,
+            "counts_match": counts_match,
+        }
+    )
+
+    if counts_match:
+        print("Integrity check passed.")
+        return
+
+    print("Integrity check failed.")
+
+
 def command_largest_expansions(connection: sqlite3.Connection, limit: int) -> None:
     rows = connection.execute(
         """
@@ -184,6 +236,8 @@ def main() -> None:
             command_documents(connection)
         elif args.command == "index-status":
             command_index_status(connection)
+        elif args.command == "index-integrity":
+            command_index_integrity(connection, args.index)
         elif args.command == "largest-expansions":
             command_largest_expansions(connection, args.limit)
         elif args.command == "page-chunks":

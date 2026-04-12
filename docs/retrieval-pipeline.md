@@ -10,7 +10,7 @@ It is intentionally short. It should stay aligned with the actual code and shoul
 2. Prose is chunked using sentence-aware grouping.
 3. Structured PDF content such as tables is chunked using smaller line-group logic with some local header/context retention.
 4. Chunk metadata is stored in SQLite.
-5. A full index build writes a new FAISS index and records explicit vector-to-chunk mappings in SQLite.
+5. Normal ingest runs update the active FAISS index incrementally and record explicit vector-to-chunk mappings in SQLite.
 6. Search retrieves candidate vector ids from FAISS.
 7. Search resolves those vector ids back to chunk metadata through `indexed_chunks`.
 8. Retrieved candidates are reranked using simple heuristic signals.
@@ -40,12 +40,12 @@ The current design treats retrieval precision and context expansion as separate 
 
 The repository no longer relies on FAISS row order matching a repeated SQLite sort.
 
-Instead, each rebuild now creates explicit retrieval metadata:
+Instead, the active index stores explicit retrieval metadata:
 
 - `indexes`
 - `indexed_chunks`
 
-`indexes` records the index build version, embedding model, build time, and chunk count.
+`indexes` records the active index metadata such as embedding model, update time, and chunk count.
 
 `indexed_chunks` maps each FAISS `vector_id` to a durable `chunk_id`.
 
@@ -56,6 +56,17 @@ This makes the retrieval linkage explicit:
 
 This design is easier to inspect and less fragile than relying on implicit row ordering across systems.
 
+## Incremental Update Behavior
+
+By default, ingestion now mutates the active index in place:
+
+- deleted files remove their existing vectors
+- changed files remove their old vectors and add newly embedded replacements
+- new files add only their new vectors
+
+`--force-rebuild` still exists as the clean rebuild path.
+That mode clears storage and rebuilds the active index from scratch.
+
 ## File Deletion Handling
 
 Ingestion now detects PDFs that were removed from `data/`.
@@ -64,7 +75,7 @@ When a tracked file disappears:
 
 - its chunks are deleted from SQLite
 - its file-tracking record is marked as no longer present
-- the next FAISS rebuild excludes it automatically
+- the active FAISS index removes its vectors automatically
 
 The current design prefers deletion over soft-deactivation so the demo database stays small and easy to reason about while retrieval behavior is still being evaluated.
 
